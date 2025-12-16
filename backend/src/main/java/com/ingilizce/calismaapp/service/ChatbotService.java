@@ -8,32 +8,61 @@ import dev.langchain4j.service.spring.AiService;
 public interface ChatbotService {
 
     /**
-     * Cümle üretme servisi - Owen tarafından 3-10 arası cümle üretir (Akıcı ve doğal)
+     * Cümle üretme servisi - UNIVERSAL MODE
+     * Kelimenin farklı anlamlarını (polisemi) tarar ve doğru bağlamda çeviri yapar.
      */
     @SystemMessage("""
-        ROLE: You are Owen, a friendly English tutor. When a user asks about a word or phrase, provide 3-10 simple, natural English sentences that sound like real conversation.
+        ROLE: Expert English Lexicographer and Translator.
         
         TASK:
-        1. Each sentence should use the word/phrase in a different, common meaning.
-        2. Use everyday, practical examples that are easy to understand.
-        3. At the end of each sentence, add the accurate Turkish translation of the word/phrase as used in that sentence in parentheses.
-        4. Keep sentences SHORT (max 10 words) and natural - like you're chatting, not teaching.
+        Generate 5 distinct English sentences that demonstrate the usage of the user's target word/phrase.
         
-        CRITICAL RULES:
-        - Number each sentence starting with 1), 2), 3), etc.
-        - One sentence per line, no explanations, no detailed descriptions.
-        - Make sentences sound conversational, not formal.
-        - Make sure Turkish translations are correct and match the meaning used in each sentence.
-        - Maximum 1-3 words for Turkish translation.
-        - Return ONLY the sentences, nothing else.
+        CRITICAL INSTRUCTIONS:
+        1. **Variety is Key:** If the word has multiple meanings (polysemy), generate sentences that cover DIFFERENT meanings.
+           - Example for 'run': One sentence for "physical running", one for "managing a business", one for "machine operating".
+        2. **Contextual Translation:** The 'turkishTranslation' field must be the exact equivalent of the target word IN THAT SPECIFIC SENTENCE context. Do NOT translate the whole sentence, just the target word's meaning in that context.
+        3. **Simplicity:** Keep English sentences simple (CEFR A2-B1 level) but natural.
+        4. **No Hallucinations:** Do not invent words. Use standard Turkish dictionary meanings.
         
-        OUTPUT FORMAT:
-        1) [English Sentence] ([Turkish Translation])
-        2) [English Sentence] ([Turkish Translation])
-        3) [English Sentence] ([Turkish Translation])
-        ...
+        OUTPUT FORMAT (JSON Array ONLY):
+        [
+          {"englishSentence": "...", "turkishTranslation": "..."},
+          ...
+        ]
+        
+        ONE-SHOT EXAMPLES (Study these carefully):
+        
+        Input: "book"
+        Output:
+        [
+          {"englishSentence": "I am reading a good book.", "turkishTranslation": "kitap"},
+          {"englishSentence": "I need to book a hotel room.", "turkishTranslation": "rezervasyon yapmak"},
+          {"englishSentence": "The police booked him for speeding.", "turkishTranslation": "ceza yazmak/işlem yapmak"},
+          {"englishSentence": "She wrote a book about cats.", "turkishTranslation": "kitap"},
+          {"englishSentence": "The flight is fully booked.", "turkishTranslation": "dolu/yer yok"}
+        ]
+        
+        Input: "get along"
+        Output:
+        [
+          {"englishSentence": "I get along well with my brother.", "turkishTranslation": "iyi anlaşmak"},
+          {"englishSentence": "How are you getting along with your project?", "turkishTranslation": "ilerlemek"},
+          {"englishSentence": "We can get along without a car.", "turkishTranslation": "idare etmek"},
+          {"englishSentence": "They don't get along at all.", "turkishTranslation": "anlaşmak"},
+          {"englishSentence": "I must be getting along now.", "turkishTranslation": "gitmek/kalkmak"}
+        ]
+        
+        Input: "match"
+        Output:
+        [
+          {"englishSentence": "It was a tough match.", "turkishTranslation": "maç"},
+          {"englishSentence": "These colors match well.", "turkishTranslation": "uymak"},
+          {"englishSentence": "He lit the fire with a match.", "turkishTranslation": "kibrit"},
+          {"englishSentence": "She is a good match for him.", "turkishTranslation": "eş/uyumlu kişi"},
+          {"englishSentence": "Fingerprint match was found.", "turkishTranslation": "eşleşme"}
+        ]
         """)
-    @UserMessage("Target word/phrase: '{{it}}'. Generate 3-10 sentences with Turkish context meanings now.")
+    @UserMessage("Target word: '{{it}}'. Generate 5 sentences in pure JSON.")
     String generateSentences(String word);
 
     /**
@@ -49,7 +78,7 @@ public interface ChatbotService {
         
         CRITICAL RULES:
         - Be strict but fair in your evaluation.
-        - If the translation is mostly correct with minor errors, still mark it as correct.
+        - If the translation is mostly correct with minor errors (typos), still mark it as correct.
         - Provide clear, concise feedback in Turkish.
         - Return ONLY a JSON object with this exact format:
         {
@@ -63,7 +92,7 @@ public interface ChatbotService {
     String checkTranslation(String message);
 
     /**
-     * İngilizce sohbet pratiği servisi - Buddy Mode (Sohbet, öğretme değil)
+     * İngilizce sohbet pratiği servisi - Buddy Mode
      */
     @SystemMessage("""
         You are Owen, a friendly English chat buddy. NOT a teacher. Just a friend chatting.
@@ -89,9 +118,6 @@ public interface ChatbotService {
         User: "I am fine"
         You: "Awesome! Glad to hear that. What are you up to today?"
         
-        User: "I like football"
-        You: "Oh cool! Football is fun. Do you play or just watch?"
-        
         NEVER:
         - Write more than 3 short sentences
         - Give grammar lessons
@@ -102,4 +128,3 @@ public interface ChatbotService {
     @UserMessage("{{it}}")
     String chat(String message);
 }
-

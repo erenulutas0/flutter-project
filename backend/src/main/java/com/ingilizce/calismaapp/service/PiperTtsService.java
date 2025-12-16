@@ -18,7 +18,10 @@ public class PiperTtsService {
     
     // --- KRİTİK DEĞİŞİKLİK BURADA ---
     // Modelleri Türkçe karakter sorunu olmaması için C:\piper klasöründen okuyoruz.
-    private static final String MODEL_BASE_DIR = "C:\\piper"; 
+    // Docker'da /piper mount point'i kullanılır
+    private static final String MODEL_BASE_DIR = System.getProperty("os.name").toLowerCase().contains("windows") 
+        ? "C:\\piper" 
+        : "/piper"; 
     
     // Klasör yolları olmadan sadece dosya isimleri (Çünkü hepsi C:\piper içinde yan yana)
     private static final String MODEL_LESSAC = "en_US-lessac-medium.onnx";
@@ -61,8 +64,11 @@ public class PiperTtsService {
             );
             
             // Working directory is less important now since we use absolute paths, 
-            // but setting it to C:\piper ensures espeak-ng-data is found easily.
-            processBuilder.directory(new File("C:\\piper"));
+            // but setting it to the model base directory ensures espeak-ng-data is found easily.
+            File workingDir = new File(MODEL_BASE_DIR);
+            if (workingDir.exists()) {
+                processBuilder.directory(workingDir);
+            }
             
             processBuilder.redirectErrorStream(true);
             Process process = processBuilder.start();
@@ -190,10 +196,16 @@ public class PiperTtsService {
         }
         
         // Try common locations (including our new safe location)
-        String[] pathsToTry = {
-            "C:\\piper\\piper.exe", // New safe location
-            "piper",
-            "piper.exe"
+        // Docker'da Linux path'leri, Windows'ta Windows path'leri
+        boolean isWindows = System.getProperty("os.name").toLowerCase().contains("windows");
+        String[] pathsToTry = isWindows ? new String[]{
+            "C:\\piper\\piper.exe", // Windows location
+            "piper.exe",
+            "piper"
+        } : new String[]{
+            "/usr/local/bin/piper", // Docker installed location
+            "/piper/piper", // Docker mount location (fallback)
+            "piper"
         };
         
         for (String path : pathsToTry) {

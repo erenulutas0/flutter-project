@@ -1,16 +1,24 @@
 package com.ingilizce.calismaapp.controller;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ingilizce.calismaapp.dto.PracticeSentence;
 import com.ingilizce.calismaapp.service.ChatbotService;
 import com.ingilizce.calismaapp.service.WordService;
+import com.ingilizce.calismaapp.service.GrammarCheckService;
 import com.ingilizce.calismaapp.entity.Word;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/chatbot")
@@ -21,10 +29,30 @@ public class ChatbotController {
     
     @Autowired
     private WordService wordService;
+    
+    @Autowired(required = false)
+    private RedisTemplate<String, Object> redisTemplate;
+    
+    @Autowired(required = false)
+    private GrammarCheckService grammarCheckService;
+    
+    @Value("${cache.sentences.ttl:604800}") // Default: 7 days
+    private long cacheTtlSeconds;
+    
+    private final ObjectMapper objectMapper;
+    private static final String CACHE_KEY_PREFIX = "sentences:";
+    
+    public ChatbotController() {
+        this.objectMapper = new ObjectMapper();
+        // Ignore unknown properties (LLM bazen farklı field isimleri kullanabilir)
+        this.objectMapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    }
 
     @PostMapping("/generate-sentences")
     public ResponseEntity<Map<String, Object>> generateSentences(@RequestBody Map<String, String> request) {
         String word = request.get("word");
+        boolean checkGrammar = request.get("checkGrammar") != null && 
+                              Boolean.parseBoolean(request.get("checkGrammar"));
         
         if (word == null || word.trim().isEmpty()) {
             Map<String, Object> error = new HashMap<>();
@@ -32,18 +60,97 @@ public class ChatbotController {
             return ResponseEntity.badRequest().body(error);
         }
         
+        String normalizedWord = word.trim().toLowerCase();
+        String cacheKey = CACHE_KEY_PREFIX + normalizedWord;
+        
         try {
-            String response = chatbotService.generateSentences(word.trim());
+            // Redis cache kontrolü
+            if (redisTemplate != null) {
+                @SuppressWarnings("unchecked")
+                List<String> cachedSentences = (List<String>) redisTemplate.opsForValue().get(cacheKey);
+                if (cachedSentences != null && !cachedSentences.isEmpty()) {
+                    System.out.println("Cache HIT for word: " + normalizedWord);
+                    Map<String, Object> result = new HashMap<>();
+                    result.put("sentences", cachedSentences);
+                    result.put("count", cachedSentences.size());
+                    result.put("cached", true);
+                    return ResponseEntity.ok(result);
+                }
+                System.out.println("Cache MISS for word: " + normalizedWord);
+            }
             
-            // Parse sentences from response
-            List<String> sentences = parseSentences(response);
+            // LLM'den JSON string al
+            String jsonResponse = chatbotService.generateSentences(normalizedWord);
+            
+            // JSON'u temizle (markdown code blocks varsa kaldır)
+            jsonResponse = jsonResponse.trim();
+            jsonResponse = jsonResponse.replaceAll("```json", "").replaceAll("```", "").trim();
+            
+            // LLM bazen yanlış field name kullanabilir, düzelt
+            jsonResponse = jsonResponse.replaceAll("\"turkishTransliteration\"", "\"turkishTranslation\"");
+            jsonResponse = jsonResponse.replaceAll("\"turkish_translation\"", "\"turkishTranslation\"");
+            jsonResponse = jsonResponse.replaceAll("\"turkish\"", "\"turkishTranslation\"");
+            
+            // Debug: JSON response'u logla
+            System.out.println("LLM JSON Response: " + jsonResponse);
+            
+            // JSON array'i parse et
+            List<PracticeSentence> practiceSentences = objectMapper.readValue(
+                jsonResponse, 
+                new TypeReference<List<PracticeSentence>>() {}
+            );
+            
+            // LanguageTool ile gramer kontrolü (opsiyonel)
+            if (checkGrammar && grammarCheckService != null && grammarCheckService.isEnabled()) {
+                List<String> englishSentences = practiceSentences.stream()
+                    .map(PracticeSentence::englishSentence)
+                    .collect(Collectors.toList());
+                
+                Map<String, List<Map<String, Object>>> grammarErrors = 
+                    grammarCheckService.checkMultipleSentences(englishSentences);
+                
+                if (!grammarErrors.isEmpty()) {
+                    System.out.println("Grammar errors found for " + grammarErrors.size() + " sentences");
+                    // Grammar errors'ı result'a ekleyebiliriz, şimdilik sadece logluyoruz
+                }
+            }
+            
+            // Frontend'e uyumlu format: "English Sentence (Turkish Translation)" formatında string listesi
+            List<String> sentences = practiceSentences.stream()
+                .map(ps -> ps.englishSentence() + " (" + ps.turkishTranslation() + ")")
+                .collect(Collectors.toList());
+            
+            // Redis'e cache'le
+            if (redisTemplate != null) {
+                try {
+                    redisTemplate.opsForValue().set(
+                        cacheKey, 
+                        sentences, 
+                        Duration.ofSeconds(cacheTtlSeconds)
+                    );
+                    System.out.println("Cached sentences for word: " + normalizedWord + " (TTL: " + cacheTtlSeconds + "s)");
+                } catch (Exception e) {
+                    System.err.println("Failed to cache sentences: " + e.getMessage());
+                    // Cache hatası olsa bile devam et
+                }
+            }
             
             Map<String, Object> result = new HashMap<>();
             result.put("sentences", sentences);
             result.put("count", sentences.size());
+            result.put("cached", false);
+            
+            // Debug için structured data'yı da logla
+            System.out.println("Generated " + practiceSentences.size() + " structured sentences for word: " + normalizedWord);
+            for (PracticeSentence ps : practiceSentences) {
+                System.out.println("  - " + ps.englishSentence() + " → " + ps.turkishTranslation());
+            }
             
             return ResponseEntity.ok(result);
         } catch (Exception e) {
+            System.err.println("Error generating sentences: " + e.getMessage());
+            System.err.println("Response was: " + (e.getMessage().contains("Response") ? "" : ""));
+            e.printStackTrace();
             Map<String, Object> error = new HashMap<>();
             error.put("error", "Failed to generate sentences: " + e.getMessage());
             return ResponseEntity.internalServerError().body(error);
@@ -89,33 +196,6 @@ public class ChatbotController {
         }
     }
 
-    private List<String> parseSentences(String response) {
-        List<String> sentences = new ArrayList<>();
-        
-        // Pattern to match numbered sentences: 1) Sentence (Translation)
-        Pattern pattern = Pattern.compile("\\d+\\)\\s*(.+?)(?=\\d+\\)|$)", Pattern.DOTALL);
-        Matcher matcher = pattern.matcher(response);
-        
-        while (matcher.find()) {
-            String sentence = matcher.group(1).trim();
-            if (!sentence.isEmpty()) {
-                sentences.add(sentence);
-            }
-        }
-        
-        // If no numbered format found, try to split by newlines
-        if (sentences.isEmpty()) {
-            String[] lines = response.split("\n");
-            for (String line : lines) {
-                line = line.trim();
-                if (!line.isEmpty() && !line.startsWith("ROLE:") && !line.startsWith("TASK:")) {
-                    sentences.add(line);
-                }
-            }
-        }
-        
-        return sentences;
-    }
 
     private Map<String, Object> parseJsonResponse(String response) {
         Map<String, Object> result = new HashMap<>();

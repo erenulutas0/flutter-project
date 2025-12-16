@@ -65,3 +65,14 @@ target/
 # Temporary files
 *.tmp
 *.temp
+
+# Docker
+docker-compose.override.yml
+*.dump
+
+# Database backups
+backup_*.sql
+backup_*.dump
+
+# Build logs
+build_log.txt
