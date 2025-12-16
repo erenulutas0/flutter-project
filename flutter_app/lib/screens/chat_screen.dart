@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import '../theme/app_theme.dart';
+import '../services/piper_tts_service.dart';
 
 class ChatMessage {
   final String text;
@@ -31,7 +34,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   final ScrollController _scrollController = ScrollController();
   final stt.SpeechToText _speech = stt.SpeechToText();
-  final FlutterTts _flutterTts = FlutterTts();
+  final PiperTtsService _piperTtsService = PiperTtsService();
+  final AudioPlayer _audioPlayer = AudioPlayer();
   
   bool _isLoading = false;
   bool _isListening = false;
@@ -39,22 +43,33 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isInConversation = false; // NEW: Conversation mode
   String _selectedVoice = 'female'; // 'female' or 'male'
   String _recognizedText = '';
-  List<dynamic> _availableVoices = [];
   bool _speechInitialized = false;
-  bool _ttsInitialized = false;
+  bool _piperTtsAvailable = false;
   Timer? _sendTimer; // Timer for auto-sending message after pause
 
   @override
   void initState() {
     super.initState();
     _initializeSpeech();
-    _initializeTts();
+    _checkPiperTts();
     // Welcome message
     _messages.add(ChatMessage(
       text: "Hello! I'm Owen, your English conversation tutor. Let's practice English together! How are you today?",
       isUser: false,
       timestamp: DateTime.now(),
     ));
+  }
+  
+  Future<void> _checkPiperTts() async {
+    bool available = await _piperTtsService.isAvailable();
+    setState(() {
+      _piperTtsAvailable = available;
+    });
+    if (available) {
+      print('Piper TTS is available - using high-quality voices');
+    } else {
+      print('Piper TTS is not available');
+    }
   }
 
   Future<void> _initializeSpeech() async {
@@ -113,193 +128,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _initializeTts() async {
-    // Set language first - use US English for best pronunciation
-    await _flutterTts.setLanguage('en-US');
-    
-    // CRITICAL: Await speak completion - this ensures full text is read
-    await _flutterTts.awaitSpeakCompletion(true);
-    
-    // Faster speech = more fluent, less robotic
-    await _flutterTts.setSpeechRate(1.0); // Normal speed for clarity
-    await _flutterTts.setVolume(1.0);
-    await _flutterTts.setPitch(1.0); // Normal pitch
-    
-    // Set completion handler - restart listening in conversation mode
-    _flutterTts.setCompletionHandler(() async {
-      if (mounted) {
-        setState(() {
-          _isSpeaking = false;
-        });
-        // Auto-restart listening if in conversation mode
-        if (_isInConversation && mounted && !_isListening) {
-          await Future.delayed(const Duration(milliseconds: 500));
-          if (mounted && _isInConversation) {
-            await _startListening();
-          }
-        }
-      }
-    });
-
-    _flutterTts.setErrorHandler((msg) {
-      print('TTS Error: $msg');
-      if (mounted) {
-        setState(() {
-          _isSpeaking = false;
-        });
-      }
-    });
-
-    // Get available voices
-    var voices = await _flutterTts.getVoices;
-    if (voices != null) {
-      setState(() {
-        _availableVoices = List<Map<String, dynamic>>.from(voices);
-        _ttsInitialized = true;
-        _setVoice();
-      });
-    } else {
-      setState(() {
-        _ttsInitialized = true;
-      });
-    }
-  }
-
-  void _setVoice() {
-    if (_availableVoices.isEmpty) {
-      print('No voices available');
-      return;
-    }
-    
-    // Print all available voices for debugging
-    print('Available voices:');
-    for (var voice in _availableVoices) {
-      print('  - ${voice['name']} (${voice['locale']})');
-    }
-    
-    // PRIORITY 1: Google voices (best quality for web)
-    // These have the most natural English pronunciation
-    List<String> googleVoices = [
-      'google us english', 'google uk english',
-    ];
-    
-    // PRIORITY 2: Premium native English voices
-    List<String> bestFemaleVoices = [
-      'samantha', 'karen', 'moira', 'tessa', 'fiona',
-      'google uk english female', 'google us english female',
-    ];
-    List<String> bestMaleVoices = [
-      'daniel', 'oliver', 'alex', 'fred',
-      'google uk english male', 'google us english male',
-    ];
-    
-    // PRIORITY 0: Google voices (BEST quality for web - native English)
-    List<dynamic> googleVoicesList = _availableVoices.where((voice) {
-      String name = (voice['name'] ?? '').toLowerCase();
-      return name.contains('google') && name.contains('english');
-    }).toList();
-    
-    if (googleVoicesList.isNotEmpty) {
-      // Find matching gender
-      var matchingGender = googleVoicesList.where((voice) {
-        String name = (voice['name'] ?? '').toLowerCase();
-        return name.contains(_selectedVoice);
-      }).toList();
-      
-      var selectedVoice = matchingGender.isNotEmpty ? matchingGender[0] : googleVoicesList[0];
-      print('Selected GOOGLE TTS voice: ${selectedVoice['name']} (${selectedVoice['locale']})');
-      _flutterTts.setVoice({
-        'name': selectedVoice['name'], 
-        'locale': selectedVoice['locale']
-      });
-      return;
-    }
-    
-    // PRIORITY 1: Best quality native English voices
-    List<dynamic> bestVoices = _availableVoices.where((voice) {
-      String name = (voice['name'] ?? '').toLowerCase();
-      String locale = (voice['locale'] ?? '').toLowerCase();
-      
-      // Must be English
-      if (!locale.contains('en') && !locale.contains('us') && !locale.contains('uk')) {
-        return false;
-      }
-      
-      if (_selectedVoice == 'female') {
-        return bestFemaleVoices.any((best) => name.contains(best));
-      } else {
-        return bestMaleVoices.any((best) => name.contains(best));
-      }
-    }).toList();
-    
-    // If best voices found, use them
-    if (bestVoices.isNotEmpty) {
-      var selectedVoice = bestVoices[0];
-      print('Selected BEST TTS voice: ${selectedVoice['name']} (${selectedVoice['locale']})');
-      _flutterTts.setVoice({
-        'name': selectedVoice['name'], 
-        'locale': selectedVoice['locale']
-      });
-      return;
-    }
-    
-    // Second priority: Any premium quality voice
-    List<String> premiumFemaleVoices = ['samantha', 'karen', 'susan', 'zira', 'hazel'];
-    List<String> premiumMaleVoices = ['alex', 'david', 'mark', 'richard', 'james'];
-    
-    List<dynamic> preferredVoices = _availableVoices.where((voice) {
-      String name = (voice['name'] ?? '').toLowerCase();
-      String locale = (voice['locale'] ?? '').toLowerCase();
-      
-      if (!locale.contains('en')) return false;
-      
-      if (_selectedVoice == 'female') {
-        return premiumFemaleVoices.any((premium) => name.contains(premium));
-      } else {
-        return premiumMaleVoices.any((premium) => name.contains(premium));
-      }
-    }).toList();
-
-    // Third priority: Any English voice matching gender
-    if (preferredVoices.isEmpty) {
-      preferredVoices = _availableVoices.where((voice) {
-        String name = (voice['name'] ?? '').toLowerCase();
-        String locale = (voice['locale'] ?? '').toLowerCase();
-        
-        if (!locale.contains('en')) return false;
-        
-        if (_selectedVoice == 'female') {
-          return name.contains('female') || name.contains('woman') || name.contains('girl');
-        } else {
-          return name.contains('male') || name.contains('man') || name.contains('boy');
-        }
-      }).toList();
-    }
-    
-    // Fourth priority: Any English voice
-    if (preferredVoices.isEmpty) {
-      preferredVoices = _availableVoices.where((voice) {
-        String locale = (voice['locale'] ?? '').toLowerCase();
-        return locale.contains('en') || locale.contains('us') || locale.contains('uk');
-      }).toList();
-    }
-
-    if (preferredVoices.isNotEmpty) {
-      var selectedVoice = preferredVoices[0];
-      print('Selected TTS voice: ${selectedVoice['name']} (${selectedVoice['locale']})');
-      _flutterTts.setVoice({
-        'name': selectedVoice['name'], 
-        'locale': selectedVoice['locale']
-      });
-    } else if (_availableVoices.isNotEmpty) {
-      // Last resort: use any available voice
-      print('Using fallback voice: ${_availableVoices[0]['name']}');
-      _flutterTts.setVoice({
-        'name': _availableVoices[0]['name'], 
-        'locale': _availableVoices[0]['locale']
-      });
-    }
-  }
 
   // START CONVERSATION - enters continuous conversation mode
   Future<void> _startConversation() async {
@@ -330,7 +158,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // END CONVERSATION - exits conversation mode
   Future<void> _endConversation() async {
     await _speech.stop();
-    await _flutterTts.stop();
     setState(() {
       _isInConversation = false;
       _isListening = false;
@@ -436,25 +263,93 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _speak(String text) async {
-    if (!_ttsInitialized) {
-      await _initializeTts();
-    }
-
     // Stop any ongoing speech before starting new one
-    await _flutterTts.stop();
+    await _audioPlayer.stop();
 
     setState(() {
       _isSpeaking = true;
     });
 
-    // Clean text but DON'T chunk - speak full text at once
-    // awaitSpeakCompletion(true) ensures we wait for full completion
     String cleanedText = text.trim();
-    
     print('Speaking: $cleanedText');
     
-    // Speak the full text - awaitSpeakCompletion will wait until done
-    await _flutterTts.speak(cleanedText);
+    // Try Piper TTS first if available (high quality)
+    if (_piperTtsAvailable) {
+      try {
+        // Select voice based on gender preference
+        // Default to 'amy' since it's available, fallback to others if they exist
+        String piperVoice = _selectedVoice == 'female' ? 'amy' : 'amy'; // Use amy for now
+        
+        Uint8List? audioData = await _piperTtsService.synthesize(cleanedText, voice: piperVoice);
+        
+        if (audioData != null && audioData.isNotEmpty) {
+          // For web, use data URI; for other platforms, use BytesSource
+          if (kIsWeb) {
+            // Convert bytes to base64 data URI for web
+            final base64Audio = base64Encode(audioData);
+            final dataUri = 'data:audio/wav;base64,$base64Audio';
+            await _audioPlayer.play(UrlSource(dataUri));
+          } else {
+            // Use BytesSource for mobile/desktop
+            await _audioPlayer.play(BytesSource(audioData));
+          }
+          
+          // Wait for playback to complete using a Completer
+          final completer = Completer<void>();
+          StreamSubscription? subscription;
+          
+          subscription = _audioPlayer.onPlayerComplete.listen((_) {
+            subscription?.cancel();
+            if (mounted) {
+              setState(() {
+                _isSpeaking = false;
+              });
+              // Auto-restart listening if in conversation mode
+              if (_isInConversation && !_isListening) {
+                Future.delayed(const Duration(milliseconds: 500), () {
+                  if (mounted && _isInConversation) {
+                    _startListening();
+                  }
+                });
+              }
+            }
+            if (!completer.isCompleted) {
+              completer.complete();
+            }
+          });
+          
+          // Wait for completion with timeout
+          await completer.future.timeout(
+            const Duration(seconds: 60),
+            onTimeout: () {
+              subscription?.cancel();
+              if (mounted) {
+                setState(() {
+                  _isSpeaking = false;
+                });
+              }
+            },
+          );
+          
+          return; // Successfully used Piper TTS
+        }
+      } catch (e) {
+        print('Piper TTS failed: $e');
+      }
+    }
+    
+    // If Piper TTS is not available, show error
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Text-to-speech is not available. Please ensure Piper TTS is configured on the backend.'),
+          backgroundColor: AppTheme.accentRed,
+        ),
+      );
+      setState(() {
+        _isSpeaking = false;
+      });
+    }
     
     // Mark as done (completion handler also does this)
     if (mounted) {
@@ -465,7 +360,7 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _stopSpeaking() async {
-    await _flutterTts.stop();
+    await _audioPlayer.stop();
     setState(() {
       _isSpeaking = false;
     });
@@ -477,7 +372,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _messageController.dispose();
     _scrollController.dispose();
     _speech.cancel();
-    _flutterTts.stop();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -629,7 +524,6 @@ class _ChatScreenState extends State<ChatScreen> {
             onSelected: (value) {
               setState(() {
                 _selectedVoice = value;
-                _setVoice();
               });
             },
             itemBuilder: (context) => [

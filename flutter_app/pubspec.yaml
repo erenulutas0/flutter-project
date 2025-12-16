@@ -26,8 +26,8 @@ dependencies:
   
   # Sesli sohbet için
   speech_to_text: ^6.6.0
-  flutter_tts: ^4.0.2
   permission_handler: ^11.3.1
+  audioplayers: ^5.2.1
 
 dev_dependencies:
   flutter_test:
